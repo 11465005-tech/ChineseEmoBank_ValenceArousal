@@ -72,6 +72,3 @@ UniCtx3 的訓練與比較程式在 UniCtx4 一併執行，多種子結果見下
 - 情緒詞不在 CVAW 時只能靠 OOV span 或整句 fallback；OOV 詞目前接不到修飾詞（例如「十分的動容」的「十分」會被丟掉）。
 - 「有幫助 / 普通 / 沒作用」標籤是依測試集 impact 的三分位切的相對標籤，且每個 span 都帶整句語境，Leave-One-Out 的 impact 在多 span 句子中會偏低，宜看數值、不宜照字面解讀。
 ---
- 
- 
-Claude 已完成回應
