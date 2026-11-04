@@ -1,83 +1,77 @@
-# ChineseEmoBank_ValenceArousal
+## v8-UniCtx3 / 4 / 5 更新說明：相關係數 loss、OOV span、整句基準先驗
  
-以 Pipelined Neural Networks（NNword → NNmod → NNsent）預測中文詞、短語、句子的 Valence-Arousal（CVAW / CVAP / CVAS），詞向量來源為 `hfl/chinese-bert-wwm-ext`。
+v8 系列的共通設計：每個 span 走同一條路徑（`NNword`，有修飾詞再接 `NNmod` 遞迴鏈 → `BERT(span [SEP] 整句)` → 同一個 adapter → 遞迴 `NNsent` step），沒有 `hit=0 / hit=1` 分支；整句語境 `max_length=128`。以下三個版本都是在前一版基礎上累加，程式檔為 `chinese_pipelined_bert_pipeline_v8-UniCtx{3,4,5}.py` 與對應的 `_colab.ipynb`。
  
-## v8-UniCtx2 更新說明：句子層 NNsent 統一語境、NNword 微調層、jieba 斷詞
+### 版本總覽（CVAS 測試集 Pearson r，單次結果，Valence / Arousal）
  
-v8-UniCtx2 是在 v8-UniCtx 上依實驗檢討所做的修改版（程式：`chinese_pipelined_bert_pipeline_v8-UniCtx2.py` 與 Colab 版 `.ipynb`）。v8 系列共有三個獨立版本：
- 
-| 版本 | 內容 |
-|---|---|
-| `v8-Simple` | 純簡化 NNsent：不再區分有／無修飾詞（`hit=1` / `hit=0`）兩種路徑 |
-| `v8-UniCtx` | 簡化版 + 向量鄰近度 kNN 特徵與 gate + OOV span |
-| `v8-UniCtx2` | 本次版本：微調層 NNword、移除 kNN、jieba 斷詞、加強正則化 |
- 
-所有 v8 版本共通的設計：每個 span 都走同一條路徑——`NNword`（有修飾詞再接 `NNmod` 遞迴鏈）取得先驗 → `BERT(span [SEP] 整句)` 取語境 → 同一個 adapter → 同一個遞迴 `NNsent` step，`hit` 只是一個輸入特徵；整句語境 `max_length=128`（v7 的「整句向量」只用 16，實際只看到句子前約 14 字）。
- 
-### 改動一：NNword 加入微調層（Stage 1）
-- 在 BERT `[CLS]` 向量與 VA 預測頭之間加一層殘差 adapter：`LayerNorm → Linear(768→256) → ReLU → Dropout → Linear(256→768)`，上投影層零初始化，起點等於原本的 v7-2。
-- 正則化：dropout（輸入端 0.2、adapter 內 0.2、預測頭 0.3）、L2（AdamW weight decay 0.05）、L1（1e-6，只加在權重矩陣）。
-- 從訓練集再切 15% 當驗證集，用驗證 loss 選最佳 epoch，並輸出 train / val / test 的 Pearson r 與落差。
-### 改動二：移除 kNN
-- 移除鄰近度特徵、`conf`、gate 與 OOV 相似度門檻。每個 span 只剩 6 維 meta：`[v0, a0, cmv, cma, hit, is_lex]`（`is_lex` = 核心詞是否在 CVAW）。
-- 看過／沒看過的詞仍走同一條路徑，差別只在 NNword 自身的預測。
-- 原因：在 NNword 層單獨比較時，kNN 與原 NNword 幾乎相同（測試詞 r：NNword 0.880 / 0.616，混合後變化 +0.000 / +0.005），且相似度信心與預測誤差相關性很弱（ρ 約 -0.08 / -0.05）。推測 kNN 與 NNword 建立在同一個 BERT 向量空間，資訊大量重疊。
-### 改動三：NNsent 斷詞改用 jieba
-- v8-UniCtx 逐字子字串比對，會把「強調」切出「強」、「視病如親」切出「親」，並把 `真的`、`極了`、`這種`、`雖然` 等功能詞收成 OOV span。
-- 新版使用 jieba 繁體詞典（`dict.txt.big`），並把 CVAW 詞全部加入詞典；以「整個斷詞結果」比對 CVAW，修飾詞只收緊鄰在情緒詞前的詞（最多 3 個 token，不跨標點）。
-- `OOV_SPANS` 預設關閉；句中找不到任何 CVAW 詞時，整句當一個 span（fallback）。
-### 改動四：NNsent 的 L1 / L2 加強
-- L2：1e-4 → 1e-3；L1：1e-5 → 5e-5；另加整句向量 dropout 0.3、隱藏層 dropout 0.2，early stopping patience 15。
-- 附選用的 L1 × L2 驗證集掃描（`RUN_REG_SWEEP`），只看驗證集，不用測試集挑參數。
-### 效果（CVAS 測試集，單次、單一種子，Colab 實際執行結果）
- 
-| | v7-3c | v8-UniCtx | v8-UniCtx2 |
+| 版本 | 主要改動 | Valence | Arousal |
 |---|---|---|---|
-| NNsent Valence r | 0.7292 | 0.7378 | 0.7345 |
-| NNsent Arousal r | 0.3954 | 0.4589 | 0.4363 |
-| 驗證集 Valence / Arousal r | — | 0.7035 / 0.4345 | 0.6984 / 0.3837 |
-| 最佳 epoch | — | 10 | 42 |
-| 最佳驗證 loss | — | 0.0188 | 0.0195 |
+| v7-3c | 舊版 NNsent | 0.7292 | 0.3954 |
+| v8-UniCtx | 簡化 + kNN + OOV span | 0.7378 | 0.4589 |
+| v8-UniCtx2 | NNword 微調層、移除 kNN、jieba 斷詞、加強 L1/L2 | 0.7345 | 0.4363 |
+| **v8-UniCtx3** | 相關係數 loss、壓縮診斷、多種子 + 基準比較 | （未單獨記錄，見下） | |
+| **v8-UniCtx4** | span 切割：OOV span、更寬的修飾詞搜尋 | 0.7552 | 0.4844 |
+| **v8-UniCtx5** | span 語境改 mean-pool、整句基準當全域先驗 | 0.7849 | 0.4942 |
  
-v8-UniCtx2 的 NNsent 訓練／驗證／測試 Pearson r：Valence 0.7793 / 0.6984 / 0.7345，Arousal 0.5783 / 0.3837 / 0.4363；測試集 MAE：Valence 0.0930、Arousal 0.1142。
-NNword（測試詞）r：Valence 0.8745、Arousal 0.6320（訓練詞 0.9346 / 0.8328）。
+單次、單一種子的差異在 ±0.01 內不宜過度解讀；真正可比較的是下面的多種子結果與「整句基準」。
  
-**觀察**
-- 加強正則化後訓練變穩（最佳 epoch 由 10 延到 42，訓練與驗證 loss 差距很小），但驗證與測試表現沒有因此變好；Arousal 比 v8-UniCtx 低 0.023，比 v7-3c 仍高 0.041。
-- 拿掉 kNN 後 Arousal 仍高於 v7-3c，與 NNword 層實驗一致，推測進步主要來自 v8 共通的整句語境（128 長度）與統一路徑，而非 kNN；此點尚未以多種子與消融確認。
-- NNword 微調層對測試表現沒有明顯改變（與先前 NNword-only 實驗 0.880 / 0.616 相比，差異在噪音內），Arousal 的訓練－測試落差仍約 0.20。
-- 斷詞異常（`強`、`親`、`真的`、`旅行`、`家屬` 等）已消失。
-**已知限制**
-- 單次、單一種子的差異在 ±0.01 內不宜過度解讀；四項修改同時進行，無法單獨歸因。
-- 情緒詞不在 CVAW 時（例如「動容」）只能退回整句 fallback；`完全` 等詞不在修飾詞表內，「完全無法」不會被當成帶修飾詞的 span。
-- 每個 span 都帶整句語境，因此 14.6 的 Leave-One-Out「沒作用」標籤在多 span 句子中會偏低，不宜照字面解讀；單一 span 句子較可信。
+### v8-UniCtx3：相對 UniCtx2 新增
+ 
+1. **`1 − r` 相關係數 loss**（`CORR_LAMBDA=0.05`）：每個梯度更新群組（16 句）在 MSE 之外加 `λ·(1 − 平均 Pearson r)`，直接針對 Pearson r 優化；挑最佳 epoch 也納入驗證 r。`CORR_LAMBDA=0` 時行為等同 UniCtx2。
+2. **預測分散度診斷**（14.5）：印出「預測標準差 / 真實標準差」。
+3. **多種子 + 不經 pipeline 的基準**（14.7）：5 組設定（正則強弱 × 相關 loss 係數）× 多個種子，並加兩個「`BERT(整句)` → 小 MLP」基準（`[CLS]` 與 mean-pool），報告平均 ± 標準差，依驗證集挑設定。
+UniCtx3 的訓練與比較程式在 UniCtx4 一併執行，多種子結果見下一節（span 切割為 UniCtx4 的版本）。
+ 
+### v8-UniCtx4：相對 UniCtx3 只改 span 切割（14.2c）
+ 
+1. **`OOV_SPANS` 預設 `True`**：不在 CVAW 的詞也可當 span（`kind='oov'`），每句最多 `MAX_OOV=4` 個。
+2. **不認得的修飾詞不再整個跳過**：token 為「修飾詞 + CVAW 詞」且修飾詞不在詞表時，保留 CVAW 核心詞（例如「完全無法」保留「無法」）；新增 Stage 3 專用的 `EXTRA_MODIFIERS`（`完全`、`根本`、`真的`、`可能`、`應該`…，NNmod 沒用這些詞訓練過）。
+3. **往前找修飾詞放寬**：`MOD_WINDOW` 3 → 6（改為「往前看幾個 token」），另設 `MAX_MODS=5`；中間隔著別的詞、助詞、逗號都不停，只在碰到前一個情感詞或句末標點時停。否定詞預設不跨逗號（`NEG_CROSS_PUNCT=False`），避免「雖然考試沒過，但心情還算平靜」變成「沒還算平靜」。
+4. **`STOPWORDS` 調整**：`真的`、`可能`、`應該`、`一定` 等會影響情緒的詞移出停用表。
+**成果（單次）**：測試集 Valence 0.7552、Arousal 0.4844（MAE 0.0885 / 0.1102），比 UniCtx2 高 0.021 / 0.048。示範句中 `美極了`、`動容` 這類不在 CVAW 的情緒詞被 OOV span 收進來；`血液`、`透析` 等中性名詞影響很小。
+ 
+**多種子比較（14.7，3 個種子，測試集 r，平均 ± 標準差）**
+ 
+| 設定 | 測試 r_V | 測試 r_A | 驗證 r_V | 驗證 r_A |
+|---|---|---|---|---|
+| A 強正則，無相關 loss | 0.727 ± 0.001 | 0.456 ± 0.018 | 0.682 ± 0.009 | 0.422 ± 0.009 |
+| B 弱正則，無相關 loss | 0.749 ± 0.009 | 0.475 ± 0.016 | 0.709 ± 0.007 | 0.421 ± 0.012 |
+| C 強正則 + 相關 loss 0.05 | 0.747 ± 0.013 | 0.468 ± 0.006 | 0.708 ± 0.011 | 0.444 ± 0.011 |
+| D 弱正則 + 相關 loss 0.05 | 0.742 ± 0.009 | 0.484 ± 0.010 | 0.701 ± 0.007 | 0.431 ± 0.011 |
+| E 弱正則 + 相關 loss 0.2 | 0.740 ± 0.011 | 0.476 ± 0.013 | 0.703 ± 0.008 | 0.449 ± 0.014 |
+| 基準 `[CLS]`（BERT 整句 → MLP） | 0.758 ± 0.004 | 0.481 ± 0.005 | 0.718 ± 0.004 | 0.428 ± 0.010 |
+| **基準 mean-pool** | **0.787 ± 0.009** | **0.508 ± 0.011** | 0.752 ± 0.005 | 0.459 ± 0.003 |
+ 
+- 弱正則比強正則在 Valence 上明顯較好（0.749 vs 0.727，標準差約 0.001–0.009）；Arousal 的差異在雜訊內。
+- 相關 loss 的效果不一致（強正則下略好，弱正則下 V 略低、A 略高），整體在雜訊內。
+- Arousal 五組設定都落在 0.456–0.484，彼此差距不超過約 1.5 個標準差。
+- **最重要的發現**：不經 pipeline 的基準（整句 mean-pool → 小 MLP）高於所有 NNsent 設定；`[CLS]` 基準與最好的 NNsent 在 Arousal 上沒有差別。
+### v8-UniCtx5：相對 UniCtx4 針對上述發現修改（只改 Stage 3 與 14.7）
+ 
+1. **span 語境向量 `[CLS]` → mean-pool**（`CTX_POOL='mean'`）：frozen BERT 的 `[CLS]` 通常不如 mean-pool 好用，推測是 NNsent 輸給基準的主要原因；樣本同時存兩種向量，14.7 可直接比較。
+2. **整句基準當全域先驗**（`USE_GLOBAL_PRIOR=True`，14.4c）：先訓練「整句 mean-pool → MLP」基準，訓練集用 5 折 out-of-fold 預測當先驗（避免洩漏）；NNsent 的遞迴狀態從先驗出發（原本是 0.5），輸出層零初始化，所以起點等於基準，span 只學修正量。
+3. **14.7 新增「NNsent 與基準混合」分析與配對差**：每次存下預測，比較各半平均、依驗證集挑權重的混合 r，並計算同一種子下「NNsent − 基準」的配對差。
+4. **14.7 可續跑**（每次存檔 `cvas_unictx5_multiseed.pkl`）、預設只比 4 組（P1 `[CLS]` 語境、P2 mean 語境、P3 mean + 先驗、P4 `[CLS]` + 先驗）；預測分散度診斷更正為「校準良好時，標準差比值應約等於 r」，並印出校準斜率。
+**成果（單次，seed 42）**
+ 
+| | Valence | Arousal |
+|---|---|---|
+| UniCtx4 NNsent | 0.7552 | 0.4844 |
+| 這次的整句基準（mean-pool） | 0.7818 | 0.4877 |
+| **UniCtx5 NNsent** | **0.7849** | **0.4942** |
+| NNsent − 基準 | +0.003 | +0.007 |
+ 
+- 測試集 MAE：Valence 0.0838、Arousal 0.1088；驗證集 r 0.7608 / 0.4643；訓練集 r 0.7652 / 0.5176。
+- 校準斜率（r ÷ 標準差比值）：Valence 約 1.0（校準良好）、Arousal 約 0.85–0.89（略為過度分散）。
+- 訓練與驗證 r 的差距很小（Valence 0.004、Arousal 0.053），但一半來自「訓練集先驗為 out-of-fold」，不能解讀為模型泛化變好。
+### 結論與已知限制
+ 
+- UniCtx5 分數最高，但幾乎全部來自整句基準：NNsent 只比基準高 0.003 / 0.007，在單次雜訊之內。目前**沒有證據**顯示 span 資訊帶來額外的句子層級準確度；pipeline 在這份資料上的價值主要是逐 span 的可解釋性，以及詞層（NNword 測試 r 0.875 / 0.632）、短語層（Pipeline 測試 r 0.946 / 0.891）的結果。
+- UniCtx5 的多種子比較（14.7 的 P1–P4 與混合分析）尚未記錄。
+- 多種子只變動 Stage 3（與基準）的初始化和資料順序，NNword / NNmod 的權重是同一組；測試集只有一份切分。
+- 情緒詞不在 CVAW 時只能靠 OOV span 或整句 fallback；OOV 詞目前接不到修飾詞（例如「十分的動容」的「十分」會被丟掉）。
+- 「有幫助 / 普通 / 沒作用」標籤是依測試集 impact 的三分位切的相對標籤，且每個 span 都帶整句語境，Leave-One-Out 的 impact 在多 span 句子中會偏低，宜看數值、不宜照字面解讀。
 ---
  
-## v7 更新說明：Word2Vec → BERT，NNword 架構重構
  
-### 改動一：詞向量來源改為 BERT
-- 改用 `hfl/chinese-bert-wwm-ext`（哈工大以數億字級中文語料預訓練的模型）
-- 透過 self-attention 直接為任意詞產生 768 維語意向量，不再需要 kNN 補值
-- 測試集未見詞的預測品質明顯提升
-### 改動二：NNword 架構重構
- 
-**舊版：相似度加權求和**
-`Int(w) = W₂ · (sigmoid(W₁·Sw + b₁) ⊙ X) + b₂`
-輸入為目標詞與所有種子詞的 cosine similarity 向量 `Sw`。此設計容易收斂到「輸出平均值」的退化解（`W₂ → 0`，無論輸入為何皆輸出固定常數）。
- 
-**新版：BERT `[CLS]` 向量直接接三層 MLP**
-`768 → 256 → 64 → 2`（最後 sigmoid 壓至 `[0,1]`）
-不再依賴種子詞相似度，直接從語意向量學習情感強度，避免了退化解。
- 
-### NNmod：邏輯不變，僅輸入維度改變
-沿用殘差移位設計，輸入維度由 128（Word2Vec）改為 768（BERT）：
- 
-- `delta = tanh(fc₂(BN(fc₁(vec_mod)))) × 0.5`
-- `Int(mod w) = sigmoid(logit(Int(w)) + delta × 3)`
-`tanh` 讓 delta 可正可負，使「非常」「沒有」等修飾詞能朝相反方向移動情感強度；在 logit（log-odds）空間做位移，確保效果在 `[0,1]` 全範圍內都均勻，不會在邊界附近被壓縮。
- 
-### 訓練流程：兩階段，NNword 於 Stage 2 凍結
-1. **Stage 1**：僅訓練 NNword，於 CVAW 上跑 50 epochs
-2. **Stage 2**：凍結 NNword 參數，僅訓練 NNmod，跑 100 epochs
-凍結原因：先前嘗試聯合訓練（NNword + NNmod 一起更新）時，NNmod 回傳的梯度會把 NNword 帶壞，使其退化為固定輸出。凍結後 NNword 只做推論、輸出穩定的 `Int(w)`，NNmod 才能正確學到修飾詞的位移效果。
- 
+Claude 已完成回應
